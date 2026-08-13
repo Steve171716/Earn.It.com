@@ -1,0 +1,517 @@
+import React, { useState, useEffect, useCallback } from "react";
+import { Ticket, Zap, Gift, Clock, ShieldCheck, ChevronRight, Check, X, LogOut, Sparkles } from "lucide-react";
+
+// ---------- Design tokens ----------
+// Navy ink background, ticket-gold + ticket-red accents, paper-white cards.
+// Signature element: a perforated "ticket strip" that fills as points are earned.
+
+const TASKS = [
+  { id: "t1", label: "Watch a sponsor spotlight", detail: "60-second video from a verified partner", points: 15, seconds: 8, cooldownHrs: 4 },
+  { id: "t2", label: "Try a partner app", detail: "Install & open a featured app once", points: 40, seconds: 10, cooldownHrs: 12 },
+  { id: "t3", label: "Quick opinion poll", detail: "3-question survey, no personal info", points: 10, seconds: 6, cooldownHrs: 4 },
+  { id: "t4", label: "Daily check-in", detail: "Just open the app today", points: 5, seconds: 2, cooldownHrs: 20 },
+];
+
+const REWARDS = [
+  { id: "r1", label: "Roblox Gift Card", sub: "$10 digital code", cost: 800, icon: "🎮" },
+  { id: "r2", label: "Xbox Gift Card", sub: "$10 digital code", cost: 800, icon: "🕹️" },
+  { id: "r3", label: "Steam Wallet Code", sub: "$10 digital code", cost: 800, icon: "💳" },
+  { id: "r4", label: "Amazon Gift Card", sub: "$5 digital code", cost: 450, icon: "🎁" },
+];
+
+function useStorage() {
+  const get = async (key) => {
+    try {
+      const r = await window.storage.get(key, false);
+      return r ? JSON.parse(r.value) : null;
+    } catch {
+      return null;
+    }
+  };
+  const set = async (key, value) => {
+    try {
+      await window.storage.set(key, JSON.stringify(value), false);
+    } catch (e) {
+      console.error("storage set failed", e);
+    }
+  };
+  return { get, set };
+}
+
+function TicketStrip({ points, target = 1000 }) {
+  const filled = Math.min(points / target, 1);
+  const segments = 20;
+  const litCount = Math.round(filled * segments);
+  return (
+    <div className="ticket-strip">
+      {Array.from({ length: segments }).map((_, i) => (
+        <div key={i} className={`ts-seg ${i < litCount ? "lit" : ""}`} />
+      ))}
+    </div>
+  );
+}
+
+function Toast({ message, onDone }) {
+  useEffect(() => {
+    const t = setTimeout(onDone, 2600);
+    return () => clearTimeout(t);
+  }, [onDone]);
+  return (
+    <div className="toast">
+      <Check size={16} strokeWidth={3} />
+      <span>{message}</span>
+    </div>
+  );
+}
+
+export default function RewardsApp() {
+  const { get, set } = useStorage();
+  const [loading, setLoading] = useState(true);
+  const [username, setUsername] = useState("");
+  const [nameInput, setNameInput] = useState("");
+  const [agreed, setAgreed] = useState(false);
+  const [points, setPoints] = useState(0);
+  const [history, setHistory] = useState([]);
+  const [cooldowns, setCooldowns] = useState({});
+  const [activeTask, setActiveTask] = useState(null);
+  const [taskProgress, setTaskProgress] = useState(0);
+  const [tab, setTab] = useState("earn");
+  const [toast, setToast] = useState(null);
+  const [redeemConfirm, setRedeemConfirm] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      const saved = await get("session:username");
+      if (saved) {
+        setUsername(saved);
+        const acct = await get(`account:${saved}`);
+        if (acct) {
+          setPoints(acct.points || 0);
+          setHistory(acct.history || []);
+          setCooldowns(acct.cooldowns || {});
+        }
+      }
+      setLoading(false);
+    })();
+  }, []);
+
+  const persist = useCallback(
+    async (nextPoints, nextHistory, nextCooldowns) => {
+      await set(`account:${username}`, {
+        points: nextPoints,
+        history: nextHistory,
+        cooldowns: nextCooldowns,
+      });
+    },
+    [username]
+  );
+
+  const handleSignup = async () => {
+    const clean = nameInput.trim().replace(/\s+/g, "_").slice(0, 24);
+    if (!clean || !agreed) return;
+    setUsername(clean);
+    await set("session:username", clean);
+    const existing = await get(`account:${clean}`);
+    if (existing) {
+      setPoints(existing.points || 0);
+      setHistory(existing.history || []);
+      setCooldowns(existing.cooldowns || {});
+    } else {
+      await set(`account:${clean}`, { points: 0, history: [], cooldowns: {} });
+    }
+  };
+
+  const handleLogout = async () => {
+    await set("session:username", "");
+    setUsername("");
+    setNameInput("");
+    setAgreed(false);
+  };
+
+  const onCooldown = (task) => {
+    const last = cooldowns[task.id];
+    if (!last) return false;
+    const elapsedHrs = (Date.now() - last) / 3600000;
+    return elapsedHrs < task.cooldownHrs;
+  };
+
+  const cooldownRemaining = (task) => {
+    const last = cooldowns[task.id];
+    if (!last) return "";
+    const remainMs = task.cooldownHrs * 3600000 - (Date.now() - last);
+    const h = Math.floor(remainMs / 3600000);
+    const m = Math.floor((remainMs % 3600000) / 60000);
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  };
+
+  const startTask = (task) => {
+    if (onCooldown(task)) return;
+    setActiveTask(task);
+    setTaskProgress(0);
+  };
+
+  useEffect(() => {
+    if (!activeTask) return;
+    if (taskProgress >= activeTask.seconds) {
+      const newPoints = points + activeTask.points;
+      const entry = { label: activeTask.label, points: activeTask.points, ts: Date.now() };
+      const newHistory = [entry, ...history].slice(0, 30);
+      const newCooldowns = { ...cooldowns, [activeTask.id]: Date.now() };
+      setPoints(newPoints);
+      setHistory(newHistory);
+      setCooldowns(newCooldowns);
+      persist(newPoints, newHistory, newCooldowns);
+      setToast(`+${activeTask.points} points — ${activeTask.label}`);
+      setActiveTask(null);
+      return;
+    }
+    const t = setTimeout(() => setTaskProgress((p) => p + 1), 1000);
+    return () => clearTimeout(t);
+  }, [activeTask, taskProgress]);
+
+  const confirmRedeem = (reward) => {
+    if (points < reward.cost) return;
+    setRedeemConfirm(reward);
+  };
+
+  const doRedeem = async () => {
+    const reward = redeemConfirm;
+    const newPoints = points - reward.cost;
+    const entry = { label: `Redeemed: ${reward.label}`, points: -reward.cost, ts: Date.now(), redemption: true };
+    const newHistory = [entry, ...history].slice(0, 30);
+    setPoints(newPoints);
+    setHistory(newHistory);
+    persist(newPoints, newHistory, cooldowns);
+    setRedeemConfirm(null);
+    setToast(`Redemption submitted — ${reward.label} code will be delivered within 24h`);
+  };
+
+  if (loading) {
+    return (
+      <div className="app-shell center">
+        <style>{styles}</style>
+        <div className="spin-ticket"><Ticket size={28} /></div>
+      </div>
+    );
+  }
+
+  if (!username) {
+    return (
+      <div className="app-shell center">
+        <style>{styles}</style>
+        <div className="auth-card">
+          <div className="brand-mark">
+            <Ticket size={22} strokeWidth={2.5} />
+            <span>REELPOINTS</span>
+          </div>
+          <h1>Earn tickets. Cash real rewards.</h1>
+          <p className="sub">
+            Complete quick tasks from verified partners, fill your ticket strip, and trade it in for real gift cards.
+          </p>
+
+          <label className="field-label">Enter Username</label>
+          <input
+            className="text-input"
+            placeholder="e.g. NightOwl_42"
+            value={nameInput}
+            onChange={(e) => setNameInput(e.target.value)}
+            maxLength={24}
+          />
+
+          <div className="trust-box">
+            <ShieldCheck size={16} />
+            <div>
+              <strong>We never ask for passwords.</strong>
+              <p>Not for this site, not for Roblox, Xbox, Steam, or anything else. Anyone who asks for another platform's password is not legitimate — that includes us.</p>
+            </div>
+          </div>
+
+          <label className="agree-row">
+            <input type="checkbox" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} />
+            <span>I understand this is a demo build. Task partners shown are placeholders for a real ad network you'd connect.</span>
+          </label>
+
+          <button className="btn-primary" disabled={!nameInput.trim() || !agreed} onClick={handleSignup}>
+            Enter <ChevronRight size={16} />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="app-shell">
+      <style>{styles}</style>
+
+      <header className="topbar">
+        <div className="brand-mark small">
+          <Ticket size={18} strokeWidth={2.5} />
+          <span>REELPOINTS</span>
+        </div>
+        <div className="user-chip">
+          <span className="dot" />
+          {username}
+          <button className="icon-btn" onClick={handleLogout} title="Log out">
+            <LogOut size={14} />
+          </button>
+        </div>
+      </header>
+
+      <section className="balance-card">
+        <div className="balance-top">
+          <div>
+            <div className="balance-label">Your tickets</div>
+            <div className="balance-num">{points.toLocaleString()}</div>
+          </div>
+          <Sparkles size={22} className="balance-icon" />
+        </div>
+        <TicketStrip points={points} />
+        <div className="balance-sub">Ticket strip fills toward 1,000 — redeem anytime once you've got enough</div>
+      </section>
+
+      <nav className="tabs">
+        <button className={tab === "earn" ? "active" : ""} onClick={() => setTab("earn")}>
+          <Zap size={15} /> Earn
+        </button>
+        <button className={tab === "redeem" ? "active" : ""} onClick={() => setTab("redeem")}>
+          <Gift size={15} /> Redeem
+        </button>
+        <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>
+          <Clock size={15} /> History
+        </button>
+      </nav>
+
+      {tab === "earn" && (
+        <div className="list">
+          {TASKS.map((task) => {
+            const cd = onCooldown(task);
+            return (
+              <div className="task-card" key={task.id}>
+                <div className="task-info">
+                  <div className="task-label">{task.label}</div>
+                  <div className="task-detail">{task.detail}</div>
+                </div>
+                <div className="task-right">
+                  <div className="task-points">+{task.points}</div>
+                  <button className="btn-task" disabled={cd} onClick={() => startTask(task)}>
+                    {cd ? cooldownRemaining(task) : "Start"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+          <div className="ad-slot-note">
+            [Ad network slot — connect AdGate Media, OfferToro, Notik, or CPX Research here for real, paid task completions]
+          </div>
+        </div>
+      )}
+
+      {tab === "redeem" && (
+        <div className="list grid">
+          {REWARDS.map((r) => (
+            <div className="reward-card" key={r.id}>
+              <div className="reward-icon">{r.icon}</div>
+              <div className="reward-label">{r.label}</div>
+              <div className="reward-sub">{r.sub}</div>
+              <div className="reward-cost">{r.cost} tickets</div>
+              <button className="btn-task full" disabled={points < r.cost} onClick={() => confirmRedeem(r)}>
+                {points < r.cost ? `Need ${r.cost - points} more` : "Redeem"}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === "history" && (
+        <div className="list">
+          {history.length === 0 && <div className="empty-state">No activity yet — complete a task to get started.</div>}
+          {history.map((h, i) => (
+            <div className="history-row" key={i}>
+              <span>{h.label}</span>
+              <span className={h.points < 0 ? "neg" : "pos"}>{h.points > 0 ? `+${h.points}` : h.points}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {activeTask && (
+        <div className="modal-overlay">
+          <div className="modal-card">
+            <div className="ad-frame">
+              <span>SPONSOR SLOT</span>
+              <div className="ad-progress-ring">{activeTask.seconds - taskProgress}s</div>
+            </div>
+            <h3>{activeTask.label}</h3>
+            <p>Simulated — a real ad network fills this slot in production.</p>
+            <div className="progress-bar">
+              <div className="progress-fill" style={{ width: `${(taskProgress / activeTask.seconds) * 100}%` }} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {redeemConfirm && (
+        <div className="modal-overlay" onClick={() => setRedeemConfirm(null)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => setRedeemConfirm(null)}>
+              <X size={16} />
+            </button>
+            <div className="reward-icon big">{redeemConfirm.icon}</div>
+            <h3>Redeem {redeemConfirm.label}?</h3>
+            <p>{redeemConfirm.cost} tickets will be deducted. Code delivered within 24 hours in a demo build; a live network fulfills this automatically.</p>
+            <button className="btn-primary" onClick={doRedeem}>
+              Confirm redemption
+            </button>
+          </div>
+        </div>
+      )}
+
+      {toast && <Toast message={toast} onDone={() => setToast(null)} />}
+    </div>
+  );
+}
+
+const styles = `
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap');
+
+* { box-sizing: border-box; }
+
+.app-shell {
+  min-height: 100vh;
+  background: #12172B;
+  background-image: radial-gradient(circle at 20% 0%, #1a2142 0%, #12172B 55%);
+  color: #F3EFE3;
+  font-family: 'Inter', sans-serif;
+  padding: 20px 16px 60px;
+  max-width: 480px;
+  margin: 0 auto;
+}
+.center { display: flex; align-items: center; justify-content: center; }
+.spin-ticket { color: #FFC93C; animation: spin 1.2s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.brand-mark {
+  display: flex; align-items: center; gap: 8px;
+  font-family: 'Space Grotesk', sans-serif;
+  font-weight: 700; letter-spacing: 0.06em;
+  color: #FFC93C; font-size: 15px; margin-bottom: 22px;
+}
+.brand-mark.small { margin-bottom: 0; font-size: 14px; }
+
+.auth-card {
+  width: 100%; max-width: 380px;
+  background: #1C2444; border: 1px solid #2b345c;
+  border-radius: 18px; padding: 28px 24px;
+}
+.auth-card h1 {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 26px; line-height: 1.15; margin: 0 0 8px;
+}
+.auth-card .sub { color: #9AA3C7; font-size: 14px; line-height: 1.5; margin: 0 0 22px; }
+
+.field-label { display: block; font-size: 12px; color: #9AA3C7; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
+.text-input {
+  width: 100%; background: #12172B; border: 1px solid #33396a;
+  color: #F3EFE3; padding: 12px 14px; border-radius: 10px; font-size: 15px;
+  margin-bottom: 18px; font-family: 'Inter', sans-serif;
+}
+.text-input:focus { outline: 2px solid #FFC93C; border-color: transparent; }
+
+.trust-box {
+  display: flex; gap: 10px; background: #12172B; border: 1px solid #2b345c;
+  border-radius: 12px; padding: 12px 14px; margin-bottom: 18px; color: #7dd3a0;
+}
+.trust-box strong { display: block; color: #F3EFE3; font-size: 13px; margin-bottom: 3px; }
+.trust-box p { margin: 0; font-size: 12.5px; color: #9AA3C7; line-height: 1.5; }
+
+.agree-row { display: flex; gap: 10px; align-items: flex-start; font-size: 12.5px; color: #9AA3C7; margin-bottom: 20px; cursor: pointer; }
+.agree-row input { margin-top: 2px; }
+
+.btn-primary {
+  width: 100%; background: #FFC93C; color: #12172B; border: none;
+  padding: 13px; border-radius: 10px; font-weight: 700; font-size: 14.5px;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  cursor: pointer; font-family: 'Space Grotesk', sans-serif;
+}
+.btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary:focus-visible { outline: 2px solid #F3EFE3; outline-offset: 2px; }
+
+.topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+.user-chip {
+  display: flex; align-items: center; gap: 8px; background: #1C2444;
+  border: 1px solid #2b345c; padding: 6px 10px 6px 12px; border-radius: 999px; font-size: 13px;
+}
+.dot { width: 6px; height: 6px; border-radius: 50%; background: #7dd3a0; }
+.icon-btn { background: none; border: none; color: #9AA3C7; cursor: pointer; padding: 4px; display: flex; }
+
+.balance-card {
+  background: linear-gradient(135deg, #1C2444, #232b52);
+  border: 1px solid #2b345c; border-radius: 18px; padding: 20px; margin-bottom: 18px;
+}
+.balance-top { display: flex; justify-content: space-between; align-items: flex-start; }
+.balance-label { font-size: 12px; color: #9AA3C7; text-transform: uppercase; letter-spacing: 0.05em; }
+.balance-num { font-family: 'IBM Plex Mono', monospace; font-size: 34px; font-weight: 500; color: #FFC93C; }
+.balance-icon { color: #FF5470; }
+.balance-sub { font-size: 11.5px; color: #7580a8; margin-top: 8px; }
+
+.ticket-strip { display: flex; gap: 3px; margin-top: 14px; }
+.ts-seg { flex: 1; height: 14px; background: #2b345c; border-radius: 2px; position: relative; }
+.ts-seg::after {
+  content: ''; position: absolute; top: 50%; left: 0; right: 0; height: 1px;
+  background: #12172B; opacity: 0.5;
+}
+.ts-seg.lit { background: linear-gradient(180deg, #FFC93C, #FF9F3C); }
+
+.tabs { display: flex; gap: 6px; margin-bottom: 16px; }
+.tabs button {
+  flex: 1; background: #1C2444; border: 1px solid #2b345c; color: #9AA3C7;
+  padding: 10px; border-radius: 10px; font-size: 13px; display: flex; align-items: center;
+  justify-content: center; gap: 6px; cursor: pointer; font-weight: 500;
+}
+.tabs button.active { background: #FFC93C; color: #12172B; border-color: #FFC93C; font-weight: 700; }
+
+.list { display: flex; flex-direction: column; gap: 10px; }
+.list.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+.task-card {
+  display: flex; justify-content: space-between; align-items: center;
+  background: #1C2444; border: 1px solid #2b345c; border-radius: 14px; padding: 14px 16px;
+}
+.task-label { font-size: 14px; font-weight: 600; }
+.task-detail { font-size: 12px; color: #9AA3C7; margin-top: 2px; }
+.task-right { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.task-points { font-family: 'IBM Plex Mono', monospace; color: #7dd3a0; font-size: 13px; }
+.btn-task {
+  background: #FF5470; color: #F3EFE3; border: none; padding: 7px 14px;
+  border-radius: 8px; font-size: 12.5px; font-weight: 700; cursor: pointer; white-space: nowrap;
+}
+.btn-task:disabled { background: #2b345c; color: #7580a8; cursor: default; }
+.btn-task.full { width: 100%; margin-top: 10px; }
+
+.ad-slot-note {
+  font-size: 11px; color: #5a6394; text-align: center; padding: 10px; border: 1px dashed #33396a; border-radius: 10px;
+}
+
+.reward-card {
+  background: #1C2444; border: 1px solid #2b345c; border-radius: 14px; padding: 16px; text-align: center;
+}
+.reward-icon { font-size: 26px; }
+.reward-icon.big { font-size: 40px; margin-bottom: 6px; }
+.reward-label { font-weight: 600; font-size: 13.5px; margin-top: 6px; }
+.reward-sub { font-size: 11.5px; color: #9AA3C7; margin-top: 2px; }
+.reward-cost { font-family: 'IBM Plex Mono', monospace; color: #FFC93C; font-size: 13px; margin-top: 8px; }
+
+.history-row {
+  display: flex; justify-content: space-between; background: #1C2444; border: 1px solid #2b345c;
+  border-radius: 12px; padding: 12px 16px; font-size: 13.5px;
+}
+.history-row .pos { color: #7dd3a0; font-family: 'IBM Plex Mono', monospace; }
+.history-row .neg { color: #FF5470; font-family: 'IBM Plex Mono', monospace; }
+.empty-state { text-align: center; color: #7580a8; font-size: 13px; padding: 30px 10px; }
+
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(10,13,26,0.75); display: flex;
+  align-items: center; justify-content: center; padding: 20px; z-index: 50;
+}
+.modal-card {
+  background: #1C2444; border: 1px solid #2b345c; border-radius: 18p
